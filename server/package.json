@@ -1,0 +1,12 @@
+{
+  "name": "thirteen-water-server",
+  "version": "1.0.0",
+  "description": "十三张多人棋牌 WebSocket 服务端",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
