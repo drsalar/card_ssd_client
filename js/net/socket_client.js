@@ -6,8 +6,29 @@
 import eventBus from '../utils/event_bus';
 import { MSG, ERR } from './protocol';
 import { SCENES } from '../databus';
+import cloud from './cloud';
 
 const MAX_RETRY = 5;
+
+// 构造易读的云通道日志 URL：cloud://{service}/ws
+function _cloudWsUrl() {
+  const service = cloud.getCloudService() || 'unknown';
+  return 'cloud://' + service + '/ws';
+}
+
+// 安全获取 LogStore（未启用调试时返回 null）
+function _logStore() {
+  try {
+    if (typeof GameGlobal !== 'undefined' && GameGlobal.logStore) return GameGlobal.logStore;
+  } catch (e) {}
+  return null;
+}
+// 静默写 WS 日志
+function _logWs(phase, payload) {
+  const s = _logStore();
+  if (!s) return;
+  try { s.writeWs(phase, payload); } catch (e) {}
+}
 
 export default class SocketClient {
   constructor() {
@@ -44,13 +65,45 @@ export default class SocketClient {
   }
 
   // 连接
+  // 入参 url 仅用于浏览器/wx.connectSocket 降级链路；云通道分支会忽略它
   connect(url) {
-    this.url = url;
     if (this.connecting || this.connected) return;
     this._userClosed = false;
     this.connecting = true;
     GameGlobal.databus && (GameGlobal.databus.netStatus = 'connecting');
     eventBus.emit('netStatus', 'connecting');
+
+    // 优先使用云托管通道：wx.cloud.connectContainer
+    if (cloud.isCloudWsAvailable()) {
+      const logUrl = _cloudWsUrl();
+      this.url = logUrl;
+      this._cloudMode = true;
+      _logWs('conn', { event: 'connect', url: logUrl, retry: this.retry });
+      let socket;
+      try {
+        socket = wx.cloud.connectContainer({
+          config: { env: cloud.getCloudEnv() },
+          service: cloud.getCloudService(),
+          path: '/ws',
+        });
+      } catch (e) {
+        console.warn('connectContainer 失败', e);
+        this._onError();
+        return;
+      }
+      // connectContainer 返回的是 socketTask
+      socket.onOpen && socket.onOpen(() => this._onOpen());
+      socket.onMessage && socket.onMessage((res) => this._onMessage(res.data));
+      socket.onClose && socket.onClose(() => this._onClose());
+      socket.onError && socket.onError(() => this._onError());
+      this.socket = socket;
+      return;
+    }
+
+    // 降级链路：wx.connectSocket / 浏览器 WebSocket
+    this.url = url;
+    this._cloudMode = false;
+    _logWs('conn', { event: 'connect', url, retry: this.retry });
 
     let socket;
     if (typeof wx !== 'undefined' && wx.connectSocket) {
@@ -80,6 +133,7 @@ export default class SocketClient {
     this.retry = 0;
     GameGlobal.databus && (GameGlobal.databus.netStatus = 'connected');
     eventBus.emit('netStatus', 'connected');
+    _logWs('conn', { event: 'open', url: this.url });
     // 自动登录
     this._autoLogin();
     // 处理 pending 队列
@@ -117,9 +171,15 @@ export default class SocketClient {
       msg = typeof data === 'string' ? JSON.parse(data) : data;
     } catch (e) {
       console.warn('收到非法消息', data);
+      _logWs('recv', { type: '<invalid>', data: String(data).slice(0, 200), level: 'error' });
       return;
     }
     const type = msg.type;
+    // 关键消息升级日志级别
+    let _lvl = 'info';
+    if (type === MSG.ERROR) _lvl = 'error';
+    else if (type === MSG.RECONNECT_SNAPSHOT) _lvl = 'warn';
+    _logWs('recv', { type, reqId: msg.reqId, data: msg.data, level: _lvl });
     // 业务层断线场景：自动 JOIN_ROOM 失败时清掉本地 room，回大厅
     if (type === MSG.ERROR && msg.code === ERR.ROOM_NOT_FOUND) {
       const databus = GameGlobal.databus;
@@ -145,6 +205,7 @@ export default class SocketClient {
     this.connected = false;
     GameGlobal.databus && (GameGlobal.databus.netStatus = 'disconnected');
     eventBus.emit('netStatus', 'disconnected');
+    _logWs('conn', { event: 'close', url: this.url, retry: this.retry, level: this._userClosed ? 'info' : 'warn' });
     if (this._userClosed) return; // 主动关闭不重连
     this._tryReconnect();
   }
@@ -155,6 +216,7 @@ export default class SocketClient {
     this.connected = false;
     GameGlobal.databus && (GameGlobal.databus.netStatus = 'disconnected');
     eventBus.emit('netStatus', 'disconnected');
+    _logWs('conn', { event: 'error', url: this.url, retry: this.retry, level: 'error' });
     if (this._userClosed) return;
     this._tryReconnect();
   }
@@ -175,8 +237,11 @@ export default class SocketClient {
     this.retry++;
     GameGlobal.databus && (GameGlobal.databus.netStatus = 'reconnecting');
     eventBus.emit('netStatus', 'reconnecting');
+    _logWs('conn', { event: 'reconnect', url: this.url, retry: this.retry, level: 'warn' });
     if (GameGlobal.toast) GameGlobal.toast.show(`重连中…(${this.retry}/${MAX_RETRY})`, 1200);
-    setTimeout(() => this.connect(this.url), 1500);
+    // 云通道分支不依赖 url，传空串即可让 connect() 走云通道；降级链路则继续使用原 url
+    const reUrl = this._cloudMode ? '' : this.url;
+    setTimeout(() => this.connect(reUrl), 1500);
   }
 
   // 注册指定 type 的处理器
@@ -195,6 +260,7 @@ export default class SocketClient {
   send(type, data = {}) {
     const reqId = ++this.reqSeq;
     const payload = { type, data, reqId };
+    _logWs('send', { type, reqId, data });
     if (!this.connected) {
       this.pendingQueue.push(payload);
       return reqId;
@@ -208,8 +274,8 @@ export default class SocketClient {
     const text = JSON.stringify(payload);
     try {
       if (this.socket.send) {
-        // 微信 socketTask: send({ data })
-        if (typeof wx !== 'undefined' && wx.connectSocket) {
+        // 微信 socketTask（含 connectContainer / connectSocket）: send({ data })
+        if (this._cloudMode || (typeof wx !== 'undefined' && wx.connectSocket)) {
           this.socket.send({ data: text });
         } else {
           this.socket.send(text);

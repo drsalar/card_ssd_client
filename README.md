@@ -65,6 +65,12 @@ go run .
 │   ├── utils             // 工具
 │   │   ├── event_bus.js
 │   │   └── assets.js
+│   ├── debug             // 调试日志面板（受 GameGlobal.DEBUG_LOG 控制）
+│   │   ├── log_store.js      // 日志缓冲单例（环形 500 条、订阅、过滤、未读计数）
+│   │   ├── console_hook.js   // 包装 console.log/info/warn/error/debug
+│   │   ├── log_button.js     // 右上角浮动 LOG 入口按钮
+│   │   ├── log_panel.js      // 调试日志面板（分类、暂停、清空、详情、发包、会话信息）
+│   │   └── util.js           // 安全序列化、时间格式化、敏感字段打码
 │   ├── databus.js        // 全局状态
 │   ├── main.js           // 入口
 │   └── render.js         // Canvas 初始化
@@ -99,7 +105,8 @@ go run .
 从本版本起，大厅与对局的网络分层被重新划分：
 
 - **大厅仅 HTTP**：客户端启动不再连接 WebSocket，进入大厅后调用 `POST /api/login` 一次性获得身份与 `activeRoom` 摘要；返回为空则隐藏“重新进入”按钮。可随时 `GET /api/lobby/active-room?openid=xxx` 复查。HTTP 接口是只读的，不会修改 Session/Player 在线状态。
-- **对局才升级 WS**：“创建房间 / 加入房间 / 重新进入”三个动作会先 `socket.connect(url)`，等待 `LOGIN_OK` 后再发送 `CREATE_ROOM / JOIN_ROOM`。已连接状态下复用；收到 `LEAVE_ROOM_OK` 或在 `MATCH_END` 后返回大厅时主动 `socket.close()` 断开。
+- **云托管通道**：所有 HTTP 与 WebSocket 默认走微信云托管 `wx.cloud.callContainer` / `wx.cloud.connectContainer`，无需在小游戏后台配置 request/socket 合法域名。云环境通过 `GameGlobal.CLOUD_ENV`（默认 `prod-d1gy3h2lh5a169861`）+ `GameGlobal.CLOUD_SERVICE`（默认 `golang-8gye`）配置；非小游戏环境（如浏览器调试）自动降级到 `wx.request` / `fetch` + `wx.connectSocket` / `WebSocket`，此时 `GameGlobal.HTTP_BASE` / `GameGlobal.SOCKET_URL` 作为兜底地址。
+- **对局才升级 WS**：“创建房间 / 加入房间 / 重新进入”三个动作会先 `socket.connect()`（云通道下不再传 URL），等待 `LOGIN_OK` 后再发送 `CREATE_ROOM / JOIN_ROOM`。已连接状态下复用；收到 `LEAVE_ROOM_OK` 或在 `MATCH_END` 后返回大厅时主动 `socket.close()` 断开。
 - **对局中才重连**：`socket_client` 仅在 `databus.scene === SCENES.ROOM` 时才进行 5 次 / 1.5 秒间隔的自动重连；重连 `LOGIN_OK` 后自动 `JOIN_ROOM`；若返回 `ROOM_NOT_FOUND` 则清空本地 `databus.room` 并提示“房间已结束”后切回大厅。
 - **微信生命周期**：`wx.onShow` 时若处于对局且 socket 已断，立即触发重连；`wx.onHide` 不主动断开，依赖微信原生层保活。市面上“切后台 30 秒以内”可无缝继续。
 - **头像离线视觉**：服务端在 `Offline` 状态变更时立即广播 `ROOM_STATE`；客户端在受影响玩家（非本人、非 Bot）的头像上叠加半透明黑色圆形蒙层 + 白色“OFF”字样，使“玩家断线”一眼可见；玩家恢复后蒙层自动移除。
@@ -116,7 +123,27 @@ GET /api/lobby/active-room?openid=xxx
 → 200 {"activeRoom": null}
 ```
 
-前端可通过全局变量 `GameGlobal.HTTP_BASE` / `GameGlobal.SOCKET_URL` 调整主机。
+前端通过全局变量集中配置网络通道：
+
+- 云托管（默认）：`GameGlobal.CLOUD_ENV` + `GameGlobal.CLOUD_SERVICE`
+- 直连降级：`GameGlobal.HTTP_BASE` + `GameGlobal.SOCKET_URL`（仅浏览器/无云能力时使用）
+
+## 调试日志面板
+
+开发期内置一个轻量调试日志面板，方便在真机/微信开发者工具外查看运行时日志、定位卡顿与协议问题。
+
+- **入口**：画布右上角浮动 `LOG` 按钮（房间页位于「退出」按钮左侧 8px）。点击切换面板显示状态；面板关闭时若有 `ERROR` 级别日志，按钮右上角显示红点。
+- **日志来源**：
+  - `console.log/info/warn/error/debug` 全量拦截；
+  - HTTP 请求/响应（method、url、status、duration、body 摘要，自动屏蔽 `token` 字段）；
+  - WebSocket 连接事件（`connect/open/close/error/reconnect`）与每条收发消息（type、reqId、payload 摘要）。
+- **面板能力**：
+  - 顶部分类标签 `ALL / CONSOLE / HTTP / WS / ERROR`；
+  - 列表区按 `HH:mm:ss.sss [LEVEL] [SOURCE] text` 显示，按级别/来源着色，贴底自动跟随；上下拖动查看历史；
+  - 工具区：`暂停 / 清空 / 发包 / 会话`，「暂停」期间日志仍写入缓冲区但不再贴底；「发包」通过两步 `wx.showModal` 输入 `type` 与 JSON `data`，校验后调用 `socket.send`；「会话」展示当前 `databus.user / scene / room / socket` 摘要；
+  - 点击单条日志弹出详情，提供「复制」按钮调用 `wx.setClipboardData`；
+  - 面板内触摸不会穿透到底层场景。
+- **关闭方式**：在 [main.js](./js/main.js) 中将 `GameGlobal.DEBUG_LOG = false`（位于文件顶部默认 `true`），即可一行关闭按钮、面板与所有 hook，发布版无任何额外开销。
 
 ## 断线重连
 

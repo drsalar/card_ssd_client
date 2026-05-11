@@ -310,7 +310,8 @@ export default class LobbyScene {
     };
     eventBus.on(MSG.LOGIN_OK, onLoginOk);
     GameGlobal.toast.show('连接服务器中...', 1500);
-    sock.connect(GameGlobal.SOCKET_URL);
+    // 不传 URL：socket_client 内部优先走云托管 connectContainer，无云能力时降级到 GameGlobal.SOCKET_URL
+    sock.connect();
   }
 
   // 调用 HTTP 登录接口，刷新 activeRoom
