@@ -106,3 +106,97 @@ export function createUserInfoAuthButton(rect, onSuccess) {
   };
   return wrap;
 }
+
+// 以「头像昵称填写能力」方式让用户手动提供资料（替代 createUserInfoButton 失效的场景）：
+//   - 头像：wx.chooseMedia 从相册/相机选一张图片，使用 tempFilePath 作为头像 URL
+//   - 昵称：wx.showModal({ editable: true }) 让用户手动输入
+// 完成后自动写入本地缓存，并把 { nickname, avatarUrl } 回调给调用方。
+// 任一环节取消即静默放弃（不写缓存、不回调）。
+//   options.mode: 'both'(默认，先选头像再填昵称) | 'avatar'(仅换头像) | 'nickname'(仅改昵称)
+//   options.firstTime: true 时在开始前先用对话框说明用途，用户点「稍后」可完全跳过
+//   options.currentNickname: 当前昵称，用于在弹窗内显示
+export function pickUserInfo(onSuccess, options = {}) {
+  if (typeof wx === 'undefined') {
+    if (typeof options.onUnsupported === 'function') options.onUnsupported();
+    return false;
+  }
+  const mode = options.mode || 'both';
+  const currentNick = (options.currentNickname || '').toString();
+  const pickAvatar = () => new Promise((resolve) => {
+    if (typeof wx.chooseMedia === 'function') {
+      wx.chooseMedia({
+        count: 1,
+        mediaType: ['image'],
+        sourceType: ['album', 'camera'],
+        sizeType: ['compressed'],
+        success: (res) => {
+          const f = res && res.tempFiles && res.tempFiles[0];
+          resolve(f && f.tempFilePath ? f.tempFilePath : '');
+        },
+        fail: () => resolve(''),
+      });
+    } else if (typeof wx.chooseImage === 'function') {
+      wx.chooseImage({
+        count: 1,
+        sizeType: ['compressed'],
+        sourceType: ['album', 'camera'],
+        success: (res) => {
+          const p = res && res.tempFilePaths && res.tempFilePaths[0];
+          resolve(p || '');
+        },
+        fail: () => resolve(''),
+      });
+    } else {
+      resolve('');
+    }
+  });
+  const askNickname = () => new Promise((resolve) => {
+    if (typeof wx.showModal !== 'function') { resolve(''); return; }
+    wx.showModal({
+      title: '请输入昵称',
+      content: currentNick && !/^玩家[0-9a-zA-Z]+$/.test(currentNick) ? `当前：${currentNick}` : '',
+      editable: true,
+      placeholderText: '请输入昵称（最多 12 字）',
+      success: (r) => {
+        if (!r.confirm) { resolve(''); return; }
+        const v = (r.content || '').trim().slice(0, 12);
+        resolve(v);
+      },
+      fail: () => resolve(''),
+    });
+  });
+  const confirmFirstTime = () => new Promise((resolve) => {
+    if (!options.firstTime || typeof wx.showModal !== 'function') { resolve(true); return; }
+    wx.showModal({
+      title: '设置个人资料',
+      content: '设置你的头像与昵称，让队友认出你。也可以稍后在主页头像处修改。',
+      confirmText: '去设置',
+      cancelText: '稍后',
+      success: (r) => resolve(!!r.confirm),
+      fail: () => resolve(false),
+    });
+  });
+
+  const commit = (avatarUrl, nickname) => {
+    if (!avatarUrl && !nickname) return; // 全部取消，静默
+    const prev = readCachedUserInfo() || {};
+    const merged = {
+      nickname: nickname || prev.nickname || '',
+      avatarUrl: avatarUrl || prev.avatarUrl || '',
+    };
+    saveWxUserInfo(merged);
+    if (typeof onSuccess === 'function') onSuccess(merged);
+  };
+
+  confirmFirstTime().then((go) => {
+    if (!go) return;
+    if (mode === 'avatar') {
+      pickAvatar().then((avatarUrl) => commit(avatarUrl, ''));
+    } else if (mode === 'nickname') {
+      askNickname().then((nickname) => commit('', nickname));
+    } else {
+      pickAvatar().then((avatarUrl) => askNickname().then((nickname) => commit(avatarUrl, nickname)));
+    }
+  });
+  return true;
+}

@@ -9,7 +9,7 @@ import { MSG, ERR } from '../net/protocol';
 import eventBus from '../utils/event_bus';
 import { SCENES } from '../databus';
 import httpClient from '../net/http_client';
-import { createUserInfoAuthButton } from '../utils/wx_user';
+import { createUserInfoAuthButton, pickUserInfo } from '../utils/wx_user';
 
 // 规则配置面板：创建房间仅设马牌 + 局数；人数不再选择（服务端固定上限 6）
 class RuleConfigPanel {
@@ -377,6 +377,8 @@ export default class LobbyScene {
       const ar = res && res.activeRoom;
       this.activeRoom = (ar && ar.roomId) ? ar : null;
       this._loginFailed = false;
+      // 登录成功后：若此设备从未填写过头像昵称，弹出一次引导流程（仅本进程弹一次）
+      this._maybePromptFirstTime();
     }).catch((err) => {
       console.warn('HTTP 登录失败', err);
       this._loginFailed = true;
@@ -405,22 +407,66 @@ export default class LobbyScene {
     } else {
       this._httpLogin();
     }
-    // 创建透明 UserInfoButton，床位与「头像+昵称」重叠
-    // （初始位置用渲染函数算过一次后动态跟随，init 时随便给一个合理估值）
-    if (!this._userInfoBtn) {
-      const initRect = { left: 12, top: 60, width: 120, height: 36 };
-      this._userInfoBtn = createUserInfoAuthButton(initRect, (info) => {
-        // 拿到真实微信资料：写回 databus、刷新头像、重新 /api/login 同步 session
-        const u = GameGlobal.databus.user;
-        if (info.nickname) u.nickname = info.nickname;
-        if (info.avatarUrl) u.avatarUrl = info.avatarUrl;
-        this.selfAvatar.fallbackText = u.nickname || '?';
-        this.selfAvatar.setUrl(u.avatarUrl || '');
-        try { eventBus.emit('user_info_updated', { ...u }); } catch (e) {}
-      });
-    } else {
-      this._userInfoBtn.show();
+    // 不再叠加透明 UserInfoButton：新版本基础库下 wx.getUserInfo 返回的都是「微信用户 + 灰色默认头像」，
+    // 原生按钮反而会吸走点击事件。统一由 canvas 层头像区域点击 → pickUserInfo（chooseMedia + showModal）获取。
+  }
+
+  // 把新获得的微信资料写回 databus + 刷新头像 + 触发重新上报
+  _applyUserInfo(info) {
+    if (!info) return;
+    const u = GameGlobal.databus.user;
+    if (info.nickname) u.nickname = info.nickname;
+    if (info.avatarUrl) u.avatarUrl = info.avatarUrl;
+    this.selfAvatar.fallbackText = u.nickname || '?';
+    this.selfAvatar.setUrl(u.avatarUrl || '');
+    try { eventBus.emit('user_info_updated', { ...u }); } catch (e) {}
+  }
+
+  // 命中头像+昵称区域：弹 ActionSheet 选「换头像 / 改昵称」
+  _handleAvatarTap() {
+    if (typeof wx === 'undefined' || typeof wx.showActionSheet !== 'function') {
+      // 非微信环境：直接走完整流程
+      this._pick('both');
+      return;
     }
+    wx.showActionSheet({
+      itemList: ['换头像', '改昵称'],
+      success: (r) => {
+        if (r.tapIndex === 0) this._pick('avatar');
+        else if (r.tapIndex === 1) this._pick('nickname');
+      },
+      fail: () => {},
+    });
+  }
+
+  // 单一入口：调起 pickUserInfo
+  _pick(mode, extra = {}) {
+    const ok = pickUserInfo((info) => {
+      this._applyUserInfo(info);
+      GameGlobal.toast.show('资料已更新');
+    }, Object.assign({
+      mode,
+      currentNickname: GameGlobal.databus.user && GameGlobal.databus.user.nickname,
+    }, extra));
+    if (!ok) {
+      GameGlobal.toast.show('当前环境不支持');
+    }
+  }
+
+  // 登录成功后：首次没填写过头像昵称时弹出引导
+  _maybePromptFirstTime() {
+    if (this._firstTimePrompted) return;
+    const u = GameGlobal.databus.user;
+    const hasAvatar = !!(u && u.avatarUrl);
+    const nick = (u && u.nickname) || '';
+    const isDefaultNick = !nick || /^玩家[0-9a-zA-Z]+$/.test(nick);
+    if (hasAvatar && !isDefaultNick) {
+      // 已经有自定义头像 + 昵称，不需要引导
+      this._firstTimePrompted = true;
+      return;
+    }
+    this._firstTimePrompted = true;
+    this._pick('both', { firstTime: true });
   }
   onExit() {
     // 离开大厅（进房间 / 切场景）隐藏按钮，避常驻画面
@@ -480,7 +526,7 @@ export default class LobbyScene {
       ctx.fillStyle = 'rgba(255,255,255,0.7)';
       ctx.font = '11px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('点击头像区域授权微信昵称', SCREEN_WIDTH / 2, topY + avatarSize + 6);
+      ctx.fillText('点击头像设置头像与昵称', SCREEN_WIDTH / 2, topY + avatarSize + 6);
     }
     // 同步 UserInfoButton 位置到「头像+昵称」起始区域（点击该区域授权）
     this._authRect.left = groupX;
@@ -522,6 +568,14 @@ export default class LobbyScene {
     if (this.rulePanel.visible) { this.rulePanel.handleTouch(x, y); return; }
     if (this.idPanel.visible) { this.idPanel.handleTouch(x, y); return; }
     if (this.bgmToggleBtn.handleTouch(x, y)) return;
+    // 头像+昵称区域命中 → 触发头像昵称填写能力（兜底，因新版本基础库下 UserInfoButton 已无法拿到真实资料）
+    const r = this._authRect;
+    if (r && r.width > 0 && r.height > 0 &&
+        x >= r.left && x <= r.left + r.width &&
+        y >= r.top && y <= r.top + r.height) {
+      this._handleAvatarTap();
+      return;
+    }
     if (this.activeRoom && this.reenterBtn.handleTouch(x, y)) return;
     if (this.createBtn.handleTouch(x, y)) return;
     if (this.joinBtn.handleTouch(x, y)) return;
