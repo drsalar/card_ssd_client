@@ -9,6 +9,8 @@ import { SCENES } from '../databus';
 import cloud from './cloud';
 
 const MAX_RETRY = 5;
+// 握手超时（毫秒）：云托管首次冷启动时 connectContainer 可能既不 open 也不报错，需要主动兜底
+const CONNECT_TIMEOUT_MS = 8000;
 
 // 构造易读的云通道日志 URL：cloud://{service}/ws
 function _cloudWsUrl() {
@@ -42,6 +44,27 @@ export default class SocketClient {
     this.reqSeq = 0;
   }
 
+  // 清理握手超时定时器
+  _clearConnectTimer() {
+    if (this._connectTimer) {
+      clearTimeout(this._connectTimer);
+      this._connectTimer = null;
+    }
+  }
+
+  // 强制释放当前 socket（不触发用户主动关闭语义，仅清理底层资源）
+  _forceCloseSocket() {
+    if (!this.socket) return;
+    try {
+      if (typeof wx !== 'undefined' && wx.connectSocket) {
+        this.socket.close && this.socket.close({});
+      } else if (typeof this.socket.close === 'function') {
+        this.socket.close();
+      }
+    } catch (e) {}
+    this.socket = null;
+  }
+
   // 主动关闭连接：使用者在离开房间返回大厅时调用
   // 与 _onClose 区别：不触发重连，直接重置状态
   close() {
@@ -50,6 +73,7 @@ export default class SocketClient {
     this.connected = false;
     this.retry = 0;
     this.pendingQueue = [];
+    this._clearConnectTimer();
     if (this.socket) {
       try {
         if (typeof wx !== 'undefined' && wx.connectSocket) {
@@ -66,37 +90,94 @@ export default class SocketClient {
 
   // 连接
   // 入参 url 仅用于浏览器/wx.connectSocket 降级链路；云通道分支会忽略它
-  connect(url) {
-    if (this.connecting || this.connected) return;
+  // 入参 force=true 时，会强制重置 connecting 状态并尝试重新连接（用于业务层卡死兜底）
+  connect(url, force) {
+    if (this.connected) return;
+    if (this.connecting && !force) return;
+    // 强制重连：清掉旧 socket 与超时定时器，重置状态
+    if (this.connecting && force) {
+      this._clearConnectTimer();
+      this._forceCloseSocket();
+      this.connecting = false;
+      _logWs('conn', { event: 'force-reset', url: this.url, level: 'warn' });
+    }
     this._userClosed = false;
     this.connecting = true;
     GameGlobal.databus && (GameGlobal.databus.netStatus = 'connecting');
     eventBus.emit('netStatus', 'connecting');
+    // 启动握手超时兜底
+    this._clearConnectTimer();
+    this._connectTimer = setTimeout(() => {
+      // 超时仍未 open：强制走错误分支，触发重连/由调用方再次决策
+      _logWs('conn', { event: 'timeout', url: this.url, level: 'error' });
+      this._forceCloseSocket();
+      this._onError();
+    }, CONNECT_TIMEOUT_MS);
 
     // 优先使用云托管通道：wx.cloud.connectContainer
     if (cloud.isCloudWsAvailable()) {
       const logUrl = _cloudWsUrl();
       this.url = logUrl;
       this._cloudMode = true;
+      const service = cloud.getCloudService();
       _logWs('conn', { event: 'connect', url: logUrl, retry: this.retry });
-      let socket;
+      let ret;
       try {
-        socket = wx.cloud.connectContainer({
+        ret = wx.cloud.connectContainer({
           config: { env: cloud.getCloudEnv() },
-          service: cloud.getCloudService(),
+          service: service,
           path: '/ws',
+          // 部分基础库版本要求显式带服务名头
+          header: { 'X-WX-SERVICE': service },
         });
       } catch (e) {
         console.warn('connectContainer 失败', e);
+        _logWs('conn', { event: 'connect-throw', url: logUrl, errMsg: (e && e.errMsg) || String(e), level: 'error' });
         this._onError();
         return;
       }
-      // connectContainer 返回的是 socketTask
-      socket.onOpen && socket.onOpen(() => this._onOpen());
-      socket.onMessage && socket.onMessage((res) => this._onMessage(res.data));
-      socket.onClose && socket.onClose(() => this._onClose());
-      socket.onError && socket.onError(() => this._onError());
-      this.socket = socket;
+      // connectContainer 返回值在不同基础库版本下不一致：
+      // - 旧版本：直接返回 socketTask（同步拿到）
+      // - 较新版本：返回 { socketTask, ... } 包装对象
+      // - 最新版本：返回 Promise，resolve 后才得到 socketTask
+      const tryBindSocket = (s) => {
+        if (!s || typeof s.onOpen !== 'function') {
+          _logWs('conn', { event: 'no-callback-api', url: logUrl, level: 'warn' });
+          return false;
+        }
+        s.onOpen(() => this._onOpen());
+        s.onMessage((res) => this._onMessage(res.data));
+        s.onClose((res) => this._onCloudClose(res));
+        s.onError((res) => this._onCloudError(res));
+        this.socket = s;
+        return true;
+      };
+
+      // 1) 同步路径：直接是 socketTask 或 { socketTask }
+      const direct = (ret && ret.socketTask) ? ret.socketTask : ret;
+      if (tryBindSocket(direct)) return;
+
+      // 2) 异步路径：返回的是 Promise
+      if (ret && typeof ret.then === 'function') {
+        _logWs('conn', { event: 'await-promise', url: logUrl });
+        ret.then((res) => {
+          // Promise resolve 后可能直接是 socketTask，也可能是 { socketTask }
+          const s = (res && res.socketTask) ? res.socketTask : res;
+          if (!tryBindSocket(s)) {
+            _logWs('conn', { event: 'promise-no-socket', url: logUrl, level: 'error' });
+            this._onError();
+          }
+        }).catch((err) => {
+          _logWs('conn', { event: 'promise-reject', url: logUrl, errMsg: (err && err.errMsg) || String(err), level: 'error' });
+          this._onError();
+        });
+        return;
+      }
+
+      // 3) 都不是：仅记录但不立即 _onError，依赖握手超时（8s）兜底
+      // 因为某些版本下 connectContainer 直接返回的对象上没有标准的 onXxx 回调，
+      // 而连接其实可能已经在底层建立了。误判会比真实失败更糟糕。
+      _logWs('conn', { event: 'unknown-return', url: logUrl, retDesc: typeof ret, level: 'warn' });
       return;
     }
 
@@ -128,6 +209,7 @@ export default class SocketClient {
 
   // 连接成功
   _onOpen() {
+    this._clearConnectTimer();
     this.connecting = false;
     this.connected = true;
     this.retry = 0;
@@ -201,6 +283,7 @@ export default class SocketClient {
 
   // 关闭
   _onClose() {
+    this._clearConnectTimer();
     this.connecting = false;
     this.connected = false;
     GameGlobal.databus && (GameGlobal.databus.netStatus = 'disconnected');
@@ -210,8 +293,23 @@ export default class SocketClient {
     this._tryReconnect();
   }
 
+  // 云通道关闭：携带 errMsg / code
+  _onCloudClose(res) {
+    _logWs('conn', {
+      event: 'close',
+      url: this.url,
+      retry: this.retry,
+      code: res && res.code,
+      reason: res && res.reason,
+      errMsg: res && res.errMsg,
+      level: this._userClosed ? 'info' : 'warn',
+    });
+    this._onClose();
+  }
+
   // 错误
   _onError() {
+    this._clearConnectTimer();
     this.connecting = false;
     this.connected = false;
     GameGlobal.databus && (GameGlobal.databus.netStatus = 'disconnected');
@@ -219,6 +317,18 @@ export default class SocketClient {
     _logWs('conn', { event: 'error', url: this.url, retry: this.retry, level: 'error' });
     if (this._userClosed) return;
     this._tryReconnect();
+  }
+
+  // 云通道错误：携带 errMsg
+  _onCloudError(res) {
+    _logWs('conn', {
+      event: 'error',
+      url: this.url,
+      retry: this.retry,
+      errMsg: res && res.errMsg,
+      level: 'error',
+    });
+    this._onError();
   }
 
   // 重连：仅对局场景中才触发；大厅场景不依赖 Socket

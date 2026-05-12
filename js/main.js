@@ -1,20 +1,25 @@
 // 客户端入口 - 十三张多人棋牌
-import './render'; // 初始化 Canvas
+import { SCREEN_WIDTH, SCREEN_HEIGHT, CANVAS_DPR } from './render'; // 初始化 Canvas
 import DataBus, { SCENES } from './databus';
 import SceneManager from './scenes/scene_manager';
 import SocketClient from './net/socket_client';
 import Toast from './ui/Toast';
+import Music from './runtime/music';
 // 调试日志模块（按 GameGlobal.DEBUG_LOG 开关启用）
 import { getLogStore } from './debug/log_store';
 import { installConsoleHook } from './debug/console_hook';
 import LogPanel from './debug/log_panel';
 import LogButton from './debug/log_button';
+import { readCachedUserInfo } from './utils/wx_user';
 
 const ctx = canvas.getContext('2d');
 
-// 调试开关：默认开启，发布时设为 false 即可关闭日志面板与所有 hook
+// 调试开关：默认开启日志采集；按钮默认隐藏，需要时设为 true
 if (typeof GameGlobal.DEBUG_LOG === 'undefined') {
   GameGlobal.DEBUG_LOG = true;
+}
+if (typeof GameGlobal.DEBUG_LOG_BUTTON === 'undefined') {
+  GameGlobal.DEBUG_LOG_BUTTON = false;
 }
 
 // 调试模块初始化（必须早于 SocketClient/Toast，以便首批日志被收集）
@@ -30,12 +35,16 @@ GameGlobal.databus = new DataBus();
 GameGlobal.sceneManager = new SceneManager();
 GameGlobal.socket = new SocketClient();
 GameGlobal.toast = new Toast();
+GameGlobal.music = new Music();
+GameGlobal.music.init();
 
 // 调试 UI
 if (GameGlobal.DEBUG_LOG) {
   try {
     GameGlobal.logPanel = new LogPanel(GameGlobal.logStore);
-    GameGlobal.logButton = new LogButton(GameGlobal.logPanel, GameGlobal.logStore);
+    if (GameGlobal.DEBUG_LOG_BUTTON) {
+      GameGlobal.logButton = new LogButton(GameGlobal.logPanel, GameGlobal.logStore);
+    }
   } catch (e) { /* 静默 */ }
 }
 // 云托管配置：env + service 集中管理（外部可通过 GameGlobal 预先注入覆盖）
@@ -89,7 +98,7 @@ export default class Main {
         // 面板打开时优先吃掉触摸
         if (GameGlobal.logPanel && GameGlobal.logPanel.handleTouchStart(t.clientX, t.clientY)) return;
         // LOG 按钮命中
-        if (GameGlobal.logButton && GameGlobal.logButton.handleTouch(t.clientX, t.clientY)) return;
+        if (GameGlobal.DEBUG_LOG_BUTTON && GameGlobal.logButton && GameGlobal.logButton.handleTouch(t.clientX, t.clientY)) return;
       }
     } catch (err) { /* 隔离 */ }
     GameGlobal.sceneManager.onTouchStart(e);
@@ -116,28 +125,63 @@ export default class Main {
   // 初始化用户信息
   initUser() {
     const databus = GameGlobal.databus;
-    // 微信小游戏 openid 需要通过 wx.login + 服务端换取，此处简化：
-    // 使用 storage 中的随机 ID 作为身份标识
+    // 方案 B：在小游戏环境调 wx.login 取临时 code，由 lobby_scene 提交服务端解 code 换真实 openid。
+    // 小游戏环境暂时使用本地缓存（或空字符串）作为 openid 占位，等服务端返回真实 openid 后再覆盖。
     let openid = '';
     try {
       openid = wx.getStorageSync && wx.getStorageSync('openid');
     } catch (e) {}
-    if (!openid) {
+    if (!openid && (typeof wx === 'undefined' || typeof wx.login !== 'function')) {
+      // 仅浏览器调试 / 无 wx.login 环境兜底（本地随机串）
       openid = 'guest_' + Math.random().toString(36).slice(2, 10);
       try { wx.setStorageSync && wx.setStorageSync('openid', openid); } catch (e) {}
     }
     databus.user.openid = openid;
-    databus.user.nickname = '玩家' + openid.slice(-4);
+    // 默认兜底昵称（未授权时显示，提示用户点击头像授权）
+    databus.user.nickname = openid ? ('玩家' + openid.slice(-4)) : '玩家';
     databus.user.avatarUrl = '';
+    // 优先使用本地缓存（上次成功授权后保存的微信资料），避免显示「玩家xxxx」
+    // 注意：微信小游戏自基础库 2.27.1 起，wx.getUserInfo 返回的昵称会被强制改为「微信用户」、
+    // 头像为灰色默认头像；wx.getUserProfile 在小游戏端已废弃。真实的昵称/头像必须通过
+    // wx.createUserInfoButton 由用户主动点击触发授权，相关按钮由 LobbyScene 创建并管理。
+    const cached = readCachedUserInfo();
+    if (cached) {
+      if (cached.nickname) databus.user.nickname = cached.nickname;
+      if (cached.avatarUrl) databus.user.avatarUrl = cached.avatarUrl;
+    }
+    // 异步调 wx.login 取 code，缓存到 databus 供 _httpLogin 使用
+    if (typeof wx !== 'undefined' && typeof wx.login === 'function') {
+      try {
+        wx.login({
+          success: (res) => {
+            if (res && res.code) databus.user._loginCode = res.code;
+          },
+          fail: () => {},
+        });
+      } catch (e) { /* 静默 */ }
+    }
   }
 
-  // 监听微信小游戏前后台切换：进入前台时若处于对局且 socket 已死则触发重连
+  // 监听微信小游戏前后台切换：
+  // - ROOM 场景：socket 已死时触发重连
+  // - LOBBY 场景：发出 lobby:refresh 事件，由大厅场景刷新 activeRoom
   _bindAppLifecycle() {
     if (typeof wx === 'undefined') return;
     if (typeof wx.onShow === 'function') {
       wx.onShow(() => {
+        if (GameGlobal.music && typeof GameGlobal.music.playBgm === 'function') {
+          GameGlobal.music.playBgm();
+        }
         const databus = GameGlobal.databus;
         if (!databus) return;
+        // 大厅场景：回前台时刷新 activeRoom，避免长时间在后台后状态过期
+        if (databus.scene === SCENES.LOBBY) {
+          try {
+            const eventBus = require('./utils/event_bus').default;
+            eventBus.emit('lobby:refresh');
+          } catch (e) { /* 静默 */ }
+          return;
+        }
         if (databus.scene !== SCENES.ROOM) return;
         const sock = GameGlobal.socket;
         if (sock && !sock.connected && !sock.connecting) {
@@ -152,16 +196,20 @@ export default class Main {
   // 主循环
   loop() {
     GameGlobal.sceneManager.update();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    if (ctx.setTransform) ctx.setTransform(CANVAS_DPR, 0, 0, CANVAS_DPR, 0, 0);
+    else ctx.scale(CANVAS_DPR, CANVAS_DPR);
+    ctx.clearRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
     GameGlobal.sceneManager.render(ctx);
     GameGlobal.toast.render(ctx);
     // 调试 UI（顶层覆盖）
     if (GameGlobal.DEBUG_LOG) {
       try {
         if (GameGlobal.logPanel) GameGlobal.logPanel.render(ctx);
-        if (GameGlobal.logButton) GameGlobal.logButton.render(ctx);
+        if (GameGlobal.DEBUG_LOG_BUTTON && GameGlobal.logButton) GameGlobal.logButton.render(ctx);
       } catch (e) {}
     }
+    ctx.restore();
     this.aniId = requestAnimationFrame(this.loop.bind(this));
   }
 }

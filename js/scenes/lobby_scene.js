@@ -3,12 +3,15 @@
 // - 创建房间 / 加入房间 / 重新进入：先建立 WebSocket，等待 LOGIN_OK 后再发送对应消息
 import { SCREEN_WIDTH, SCREEN_HEIGHT } from '../render';
 import Button from '../ui/Button';
+import BgmToggleButton from '../ui/BgmToggleButton';
+import Avatar from '../ui/Avatar';
 import { MSG, ERR } from '../net/protocol';
 import eventBus from '../utils/event_bus';
 import { SCENES } from '../databus';
 import httpClient from '../net/http_client';
+import { createUserInfoAuthButton } from '../utils/wx_user';
 
-// 规则配置面板
+// 规则配置面板：创建房间仅设马牌 + 局数；人数不再选择（服务端固定上限 6）
 class RuleConfigPanel {
   constructor(onConfirm, onCancel) {
     this.visible = false;
@@ -16,9 +19,8 @@ class RuleConfigPanel {
     this.onCancel = onCancel;
     this.withMa = true;
     this.totalRounds = 5;
-    this.maxPlayers = 4;
     this.width = Math.min(SCREEN_WIDTH * 0.85, 320);
-    this.height = 320;
+    this.height = 250;
     this.x = (SCREEN_WIDTH - this.width) / 2;
     this.y = (SCREEN_HEIGHT - this.height) / 2;
     this._buildButtons();
@@ -44,22 +46,11 @@ class RuleConfigPanel {
         this.roundBtns.forEach((b, j) => { b.bgColor = rounds[j] === r ? '#4a90e2' : '#bbb'; });
       },
     }));
-    // 人数选项
-    const counts = [2, 3, 4, 5, 6];
-    this.countBtns = counts.map((n, i) => new Button({
-      x: this.x + 16 + i * 52, y: baseY + 190,
-      width: 44, height: 32, text: `${n}人`, fontSize: 14,
-      bgColor: n === this.maxPlayers ? '#4a90e2' : '#bbb',
-      onClick: () => {
-        this.maxPlayers = n;
-        this.countBtns.forEach((b, j) => { b.bgColor = counts[j] === n ? '#4a90e2' : '#bbb'; });
-      },
-    }));
     // 确认/取消
     this.confirmBtn = new Button({
       x: this.x + this.width / 2 + 10, y: this.y + this.height - 50,
       width: 100, height: 36, text: '创建',
-      onClick: () => { this.visible = false; this.onConfirm({ withMa: this.withMa, totalRounds: this.totalRounds, maxPlayers: this.maxPlayers }); },
+      onClick: () => { this.visible = false; this.onConfirm({ withMa: this.withMa, totalRounds: this.totalRounds }); },
     });
     this.cancelBtn = new Button({
       x: this.x + this.width / 2 - 110, y: this.y + this.height - 50,
@@ -85,13 +76,11 @@ class RuleConfigPanel {
     ctx.fillText('创建房间', this.x + this.width / 2, this.y + 16);
     ctx.font = '14px sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText('是否带马牌（红桃5双倍）', this.x + 16, this.y + 66);
+    ctx.fillText('是否带马牌（红桃 5 双倍）', this.x + 16, this.y + 66);
     ctx.fillText('对局局数', this.x + 16, this.y + 100);
-    ctx.fillText('最大玩家数', this.x + 16, this.y + 170);
     ctx.restore();
     this.maBtn.render(ctx);
     this.roundBtns.forEach((b) => b.render(ctx));
-    this.countBtns.forEach((b) => b.render(ctx));
     this.confirmBtn.render(ctx);
     this.cancelBtn.render(ctx);
   }
@@ -100,13 +89,11 @@ class RuleConfigPanel {
     if (!this.visible) return false;
     if (this.maBtn.handleTouch(x, y)) return true;
     if (this.roundBtns.some((b) => b.handleTouch(x, y))) return true;
-    if (this.countBtns.some((b) => b.handleTouch(x, y))) return true;
     if (this.confirmBtn.handleTouch(x, y)) return true;
     if (this.cancelBtn.handleTouch(x, y)) return true;
     return true; // 蒙层吞事件
   }
 }
-
 // 房间号输入面板
 class RoomIdInputPanel {
   constructor(onConfirm, onCancel) {
@@ -221,6 +208,17 @@ export default class LobbyScene {
       bgColor: '#5cb85c',
       onClick: () => this.idPanel.show(),
     });
+    this.bgmToggleBtn = new BgmToggleButton({ width: 72, height: 28, fontSize: 13 });
+
+    // 自身头像（直径 36px，主页顶部 “头像 + 昵称” 居中显示）
+    this.selfAvatar = new Avatar({ size: 36, fallbackText: GameGlobal.databus.user.nickname || '?' });
+    if (GameGlobal.databus.user.avatarUrl) {
+      this.selfAvatar.setUrl(GameGlobal.databus.user.avatarUrl);
+    }
+    // 透明的 UserInfoButton（在 onEnter 里创建，onExit 里销毁）
+    this._userInfoBtn = null;
+    // 最后一次渲染计算出的「头像+昵称」区域，用于同步 UserInfoButton 位置
+    this._authRect = { left: 0, top: 0, width: 0, height: 0 };
 
     // 弹窗
     this.rulePanel = new RuleConfigPanel(
@@ -239,6 +237,16 @@ export default class LobbyScene {
     eventBus.on(MSG.CREATE_ROOM_OK, (data) => {
       // 服务端会同时通过 ROOM_STATE 推送，跳转场景由 ROOM_STATE 触发
       GameGlobal.toast.show(`房间已创建：${data.roomId}`);
+    });
+    // 微信资料异步更新：刷新头像并重新上报到服务端
+    eventBus.on('user_info_updated', (user) => {
+      if (!user) return;
+      this.selfAvatar.fallbackText = user.nickname || '?';
+      this.selfAvatar.setUrl(user.avatarUrl || '');
+      // 仅在大厅场景下才重新调 /api/login 同步 session
+      if (GameGlobal.databus.scene === SCENES.LOBBY) {
+        this._httpLogin();
+      }
     });
     eventBus.on(MSG.JOIN_ROOM_OK, () => {
       GameGlobal.toast.show('加入成功');
@@ -271,6 +279,12 @@ export default class LobbyScene {
         this.activeRoom = null;
       }
     });
+    // 小程序回前台触发：仅在大厅时刷新 activeRoom（走只读接口，更轻量）
+    eventBus.on('lobby:refresh', () => {
+      if (GameGlobal.databus.scene === SCENES.LOBBY) {
+        this.refreshActiveRoom();
+      }
+    });
   }
 
   // 点击重新进入：先建立 WS，再发送 JOIN_ROOM
@@ -297,6 +311,7 @@ export default class LobbyScene {
   // 确保 WebSocket 已建立并已 LOGIN_OK，然后调用回调
   // - 已连接：直接执行
   // - 未连接：connect → 等待 LOGIN_OK → 执行回调
+  // - 已处于 connecting 状态：用户主动点击意味着前一次握手可能已卡死，强制重连
   _ensureSocketAndSend(action) {
     const sock = GameGlobal.socket;
     if (sock && sock.connected) {
@@ -310,26 +325,63 @@ export default class LobbyScene {
     };
     eventBus.on(MSG.LOGIN_OK, onLoginOk);
     GameGlobal.toast.show('连接服务器中...', 1500);
+    // 用户主动入房：若已在 connecting 中，传 force=true 让 socket_client 强制重置后再连
     // 不传 URL：socket_client 内部优先走云托管 connectContainer，无云能力时降级到 GameGlobal.SOCKET_URL
-    sock.connect();
+    const force = !!(sock && sock.connecting);
+    sock.connect(undefined, force);
+  }
+
+  // 仅刷新 activeRoom（只读接口，不修改服务端在线状态 / 不重发 wx.login code）
+  // 适用场景：从后台切回前台、停留在大厅时定时刷新等
+  // 失败时静默：保留上一次 activeRoom 状态，避免误把按钮抹掉
+  refreshActiveRoom() {
+    const user = GameGlobal.databus.user;
+    if (!user || !user.openid) return;
+    // 仍在大厅时才更新 UI；否则直接丢弃响应
+    httpClient.get('/api/lobby/active-room', { openid: user.openid }).then((res) => {
+      if (GameGlobal.databus.scene !== SCENES.LOBBY) return;
+      const ar = res && res.activeRoom;
+      this.activeRoom = (ar && ar.roomId) ? ar : null;
+    }).catch((err) => {
+      // 静默处理：仅日志告警，不弹 toast，不清空 activeRoom
+      console.warn('刷新 activeRoom 失败', err);
+    });
   }
 
   // 调用 HTTP 登录接口，刷新 activeRoom
+  // 方案 B：优先以 wx.login 拿到的 code 发服务端解析真实 openid；
+  //        服务端返回的 openid 覆盖到 storage 与 databus 中。
   _httpLogin() {
     const user = GameGlobal.databus.user;
-    httpClient.post('/api/login', {
-      openid: user.openid,
+    const code = user._loginCode || '';
+    const body = {
       nickname: user.nickname,
       avatarUrl: user.avatarUrl,
-    }).then((res) => {
+    };
+    if (code) {
+      body.code = code;
+    } else if (user.openid) {
+      // 兜底：浏览器调试 / 老链路 → 仍然带 openid
+      body.openid = user.openid;
+    }
+    httpClient.post('/api/login', body).then((res) => {
       // 已经在房间场景里则不刷新（防止 race）
       if (GameGlobal.databus.scene !== SCENES.LOBBY) return;
+      // 服务端解析出来的真实 openid 覆盖本地（仅 wx.login 链路才会回填）
+      if (res && res.openid && res.openid !== user.openid) {
+        user.openid = res.openid;
+        try { wx.setStorageSync && wx.setStorageSync('openid', res.openid); } catch (e) {}
+      }
+      // code 仅一次性使用，成功后清除避免重发
+      user._loginCode = '';
       const ar = res && res.activeRoom;
       this.activeRoom = (ar && ar.roomId) ? ar : null;
       this._loginFailed = false;
     }).catch((err) => {
       console.warn('HTTP 登录失败', err);
       this._loginFailed = true;
+      // code 失败的话也要丢弃，下次进入大厅会重新 wx.login
+      user._loginCode = '';
       GameGlobal.toast.show('登录失败，点击重试');
     });
   }
@@ -338,9 +390,42 @@ export default class LobbyScene {
     // 进入大厅时调用 HTTP 登录刷新 activeRoom
     this.activeRoom = null;
     this._loginFailed = false;
-    this._httpLogin();
+    // 若 main.js 启动时的 wx.login 还没回 / 已被消费，再尝试取一次 code
+    const user = GameGlobal.databus.user;
+    if (!user._loginCode && typeof wx !== 'undefined' && typeof wx.login === 'function') {
+      try {
+        wx.login({
+          success: (res) => {
+            if (res && res.code) user._loginCode = res.code;
+            this._httpLogin();
+          },
+          fail: () => { this._httpLogin(); },
+        });
+      } catch (e) { this._httpLogin(); }
+    } else {
+      this._httpLogin();
+    }
+    // 创建透明 UserInfoButton，床位与「头像+昵称」重叠
+    // （初始位置用渲染函数算过一次后动态跟随，init 时随便给一个合理估值）
+    if (!this._userInfoBtn) {
+      const initRect = { left: 12, top: 60, width: 120, height: 36 };
+      this._userInfoBtn = createUserInfoAuthButton(initRect, (info) => {
+        // 拿到真实微信资料：写回 databus、刷新头像、重新 /api/login 同步 session
+        const u = GameGlobal.databus.user;
+        if (info.nickname) u.nickname = info.nickname;
+        if (info.avatarUrl) u.avatarUrl = info.avatarUrl;
+        this.selfAvatar.fallbackText = u.nickname || '?';
+        this.selfAvatar.setUrl(u.avatarUrl || '');
+        try { eventBus.emit('user_info_updated', { ...u }); } catch (e) {}
+      });
+    } else {
+      this._userInfoBtn.show();
+    }
   }
-  onExit() {}
+  onExit() {
+    // 离开大厅（进房间 / 切场景）隐藏按钮，避常驻画面
+    if (this._userInfoBtn) this._userInfoBtn.hide();
+  }
   update() {}
 
   render(ctx) {
@@ -358,22 +443,58 @@ export default class LobbyScene {
     ctx.fillText('十三张', SCREEN_WIDTH / 2, SCREEN_HEIGHT * 0.18);
     ctx.font = '16px sans-serif';
     ctx.fillText('多人在线棋牌', SCREEN_WIDTH / 2, SCREEN_HEIGHT * 0.18 + 50);
-    // 网络状态
-    const netStatus = GameGlobal.databus.netStatus;
-    const statusMap = {
-      disconnected: { text: '离线', color: '#e57373' },
-      connecting: { text: '连接中...', color: '#ffd54f' },
-      connected: { text: '已连接', color: '#81c784' },
-    };
-    const st = statusMap[netStatus] || statusMap.disconnected;
-    ctx.fillStyle = st.color;
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(`● ${st.text}`, SCREEN_WIDTH - 12, 12);
-    // 用户信息
-    ctx.fillStyle = '#fff';
+    // 顶部信息栏 y 坐标（下移到刘海/状态栏之下）
+    const topY = 60;
+    // 仅在 HTTP 登录失败时展示「服务异常，点击重试」提示；大厅不依赖 WS，不再渲染 netStatus
+    if (this._loginFailed) {
+      ctx.fillStyle = '#e57373';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText('服务异常，点击重试', 12, topY);
+    }
+    this.bgmToggleBtn.setPosition(12, topY + 22);
+    this.bgmToggleBtn.render(ctx);
+    // 玩家名称（顶部居中，避开刘海与状态栏）
+    // 在昵称左侧绘制圆形头像，整体水平居中
+    const user = GameGlobal.databus.user;
+    const nickname = user.nickname || '';
+    const avatarSize = 36;
+    const gap = 8;
+    ctx.font = '14px sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText(GameGlobal.databus.user.nickname, 12, 12);
+    ctx.textBaseline = 'middle';
+    const nameW = ctx.measureText(nickname).width;
+    const groupW = avatarSize + gap + nameW;
+    const groupX = (SCREEN_WIDTH - groupW) / 2;
+    const groupCenterY = topY + avatarSize / 2;
+    // 头像
+    this.selfAvatar.fallbackText = nickname || '?';
+    this.selfAvatar.setUrl(user.avatarUrl || '');
+    this.selfAvatar.render(ctx, groupX, topY, avatarSize);
+    // 昵称
+    ctx.fillStyle = '#fff';
+    ctx.fillText(nickname, groupX + avatarSize + gap, groupCenterY);
+    // 提示文本（未拿到真实微信资料时提示点击授权）
+    if (!user.avatarUrl) {
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('点击头像区域授权微信昵称', SCREEN_WIDTH / 2, topY + avatarSize + 6);
+    }
+    // 同步 UserInfoButton 位置到「头像+昵称」起始区域（点击该区域授权）
+    this._authRect.left = groupX;
+    this._authRect.top = topY;
+    this._authRect.width = Math.max(avatarSize, groupW);
+    this._authRect.height = avatarSize;
+    if (this._userInfoBtn) {
+      this._userInfoBtn.setPosition(
+        this._authRect.left,
+        this._authRect.top,
+        this._authRect.width,
+        this._authRect.height,
+      );
+    }
 
     // 主按钮
     if (this.activeRoom) {
@@ -400,6 +521,7 @@ export default class LobbyScene {
     // 优先弹窗
     if (this.rulePanel.visible) { this.rulePanel.handleTouch(x, y); return; }
     if (this.idPanel.visible) { this.idPanel.handleTouch(x, y); return; }
+    if (this.bgmToggleBtn.handleTouch(x, y)) return;
     if (this.activeRoom && this.reenterBtn.handleTouch(x, y)) return;
     if (this.createBtn.handleTouch(x, y)) return;
     if (this.joinBtn.handleTouch(x, y)) return;

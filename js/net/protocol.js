@@ -43,6 +43,16 @@ export const MSG = {
   ROOM_KICK_BOT: 'ROOM_KICK_BOT',
   ROOM_KICK_BOT_OK: 'ROOM_KICK_BOT_OK',
 
+  // 房主踢出真人玩家
+  ROOM_KICK_PLAYER: 'ROOM_KICK_PLAYER',         // 客户端 → 服务端：房主请求踢出真人玩家
+  ROOM_KICK_PLAYER_OK: 'ROOM_KICK_PLAYER_OK',   // 服务端 → 客户端：踢人成功回执
+  ROOM_KICKED: 'ROOM_KICKED',                   // 服务端 → 客户端：被踢通知（单播给被踢玩家）
+
+  // 投票解散对局
+  VOTE_DISSOLVE: 'VOTE_DISSOLVE',                // 客户端 → 服务端：发起/同意解散
+  VOTE_DISSOLVE_CANCEL: 'VOTE_DISSOLVE_CANCEL',  // 客户端 → 服务端：撤销同意
+  VOTE_DISSOLVE_TIMEOUT: 'VOTE_DISSOLVE_TIMEOUT',// 服务端 → 客户端：投票 60 秒超时
+
   // 错误
   ERROR: 'ERROR',
 };

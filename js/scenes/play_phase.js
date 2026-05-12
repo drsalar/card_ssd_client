@@ -6,6 +6,7 @@ import Card, { CARD_WIDTH, CARD_HEIGHT } from '../ui/Card';
 import CardGroup from '../ui/CardGroup';
 import { sortBySuit, sortByRank } from '../game/card';
 import { evaluate } from '../game/hand_evaluator';
+import { HAND_PATTERN_DEFS, findPatternCombos } from '../game/hand_pattern';
 import { validateLanes } from '../game/lane_validator';
 import { MSG } from '../net/protocol';
 
@@ -26,6 +27,9 @@ export default class PlayPhase {
     this._isHandSliding = false;
     // 三道命中区
     this._laneHits = { head: [], middle: [], tail: [] };
+    // 牌型快捷选择缓存
+    this._patternCombos = {};
+    this._patternCycle = {};
   }
 
   _buildButtons() {
@@ -60,6 +64,14 @@ export default class PlayPhase {
       bgColor: '#5cb85c', disabled: true,
       onClick: () => this._submit(),
     });
+    this.patternBtns = HAND_PATTERN_DEFS.map((def) => ({
+      def,
+      btn: new Button({
+        x: 0, y: 0, width: 48, height: layout.patternBtnH, text: def.label, fontSize: 11,
+        bgColor: '#f5a623', disabledColor: '#666',
+        onClick: () => this._selectPattern(def.key),
+      }),
+    }));
     this._updateButtonLayout(layout);
   }
 
@@ -67,34 +79,52 @@ export default class PlayPhase {
   _getLayout() {
     const SW = SCREEN_WIDTH;
     const SH = SCREEN_HEIGHT;
+    const room = GameGlobal.databus.room;
+    const playerCount = room && Array.isArray(room.players) ? room.players.length : 0;
     const margin = Math.max(8, Math.floor(SW * 0.025));
-    const sideSafe = Math.max(56, Math.min(86, Math.floor(SW * 0.18)));
-    const laneW = Math.min(SW - margin * 2, Math.max(200, Math.min(460, SW - sideSafe * 2)));
+    const sideSafeRate = playerCount >= 5 ? 0.24 : playerCount >= 3 ? 0.21 : 0.18;
+    const sideSafeMin = playerCount >= 5 ? 96 : 64;
+    const sideSafeMax = playerCount >= 5 ? 122 : 96;
+    const sideSafe = Math.max(sideSafeMin, Math.min(sideSafeMax, Math.floor(SW * sideSafeRate)));
+    const laneW = Math.min(SW - margin * 2, Math.max(220, Math.min(430, SW - sideSafe * 2)));
     const laneX = Math.floor((SW - laneW) / 2);
     const handCardW = Math.max(30, Math.min(CARD_WIDTH, Math.floor(SW / 11.2)));
     const handCardH = Math.round(handCardW * CARD_HEIGHT / CARD_WIDTH);
-    const bottomGap = Math.max(28, Math.min(56, Math.floor(SH * 0.07)));
-    const handY = Math.max(Math.floor(SH * 0.68), SH - handCardH - bottomGap);
+    const patternBtnH = Math.max(22, Math.min(28, Math.floor(SH * 0.04)));
+    const patternGap = Math.max(4, Math.min(8, Math.floor(SH * 0.012)));
+    const bottomGap = Math.max(22, Math.min(42, Math.floor(SH * 0.055)));
+    const patternY = SH - bottomGap - patternBtnH;
+    const handY = Math.max(0, patternY - patternGap - handCardH);
     const actionBtnH = Math.max(24, Math.min(30, Math.floor(SH * 0.045)));
-    const actionY = Math.max(Math.floor(SH * 0.53), handY - actionBtnH - 8);
+    const actionY = Math.max(Math.floor(SH * 0.50), handY - actionBtnH - 8);
     const topSafe = Math.max(86, Math.floor(SH * 0.18));
     const availableH = Math.max(108, actionY - topSafe - 6);
     const laneGap = Math.max(5, Math.min(10, Math.floor(SH * 0.012)));
     const laneH = Math.max(34, Math.min(76, Math.floor((availableH - laneGap * 2) / 3)));
     const laneTotalH = laneH * 3 + laneGap * 2;
-    const laneY0 = topSafe + Math.max(0, Math.floor((availableH - laneTotalH) * 0.76));
-    const laneBtnW = Math.max(52, Math.min(64, Math.floor(laneW * 0.22)));
+    const table = this.scene && this.scene._getTableLayout
+      ? this.scene._getTableLayout(room && room.phase, handY)
+      : { cy: Math.floor(SH * 0.39) };
+    const preferredLaneY0 = table.cy - Math.floor(laneTotalH * 0.48);
+    const maxLaneY0 = actionY - laneTotalH - 10;
+    const laneY0 = Math.max(topSafe, Math.min(preferredLaneY0, maxLaneY0));
+    const laneBtnW = Math.max(48, Math.min(58, Math.floor(laneW * 0.20)));
     const laneBtnH = Math.max(20, Math.min(28, Math.floor(laneH * 0.42)));
     const sortW = Math.max(58, Math.min(70, Math.floor(SW * 0.18)));
     const openW = Math.max(76, Math.min(90, Math.floor(SW * 0.23)));
-    const laneCardH = Math.max(30, Math.min(54, laneH - 12));
-    const laneCardW = Math.round(laneCardH * CARD_WIDTH / CARD_HEIGHT);
-    const laneStep = Math.max(13, Math.min(22, Math.floor(laneCardW * 0.72)));
-    const labelW = Math.max(58, Math.min(82, Math.floor((laneW - laneBtnW - 16) * 0.34)));
+    const labelW = Math.max(48, Math.min(66, Math.floor((laneW - laneBtnW - 14) * 0.28)));
+    const cardsAreaW = Math.max(88, laneW - labelW - laneBtnW - 20);
+    const laneCardHByHeight = Math.max(28, Math.min(50, laneH - 12));
+    const laneCardWByHeight = Math.round(laneCardHByHeight * CARD_WIDTH / CARD_HEIGHT);
+    const laneCardWByWidth = Math.floor(cardsAreaW / 3.65);
+    const laneCardW = Math.max(24, Math.min(laneCardWByHeight, laneCardWByWidth));
+    const laneCardH = Math.round(laneCardW * CARD_HEIGHT / CARD_WIDTH);
+    const laneStep = Math.max(10, Math.min(Math.floor(laneCardW * 0.68), Math.floor((cardsAreaW - laneCardW) / 4)));
     return {
       margin, laneX, laneY0, laneW, laneH, laneGap,
       laneBtnW, laneBtnH, sortW, openW, actionY, actionBtnH,
-      handY, handCardW, handCardH, laneCardW, laneCardH, laneStep, labelW,
+      handY, handCardW, handCardH, patternY, patternBtnH, patternGap,
+      laneCardW, laneCardH, laneStep, labelW,
     };
   }
 
@@ -112,6 +142,20 @@ export default class PlayPhase {
     this.openBtn.y = layout.actionY - 4;
     this.openBtn.width = layout.openW;
     this.openBtn.height = layout.actionBtnH + 8;
+    const visiblePatterns = this._getVisiblePatternItems();
+    const gap = 4;
+    const btnW = Math.max(40, Math.min(54, Math.floor((SCREEN_WIDTH - layout.margin * 2 - gap * (visiblePatterns.length - 1)) / visiblePatterns.length)));
+    visiblePatterns.forEach((item, i) => {
+      item.btn.visible = true;
+      item.btn.x = layout.margin + i * (btnW + gap);
+      item.btn.y = layout.patternY;
+      item.btn.width = btnW;
+      item.btn.height = layout.patternBtnH;
+      item.btn.fontSize = btnW < 44 ? 10 : 11;
+    });
+    this.patternBtns.forEach((item) => {
+      if (visiblePatterns.indexOf(item) < 0) item.btn.visible = false;
+    });
     this.laneActionBtns.forEach((b, i) => {
       const y = layout.laneY0 + i * (layout.laneH + layout.laneGap);
       const btnX = layout.laneX + layout.laneW - layout.laneBtnW - 6;
@@ -125,6 +169,42 @@ export default class PlayPhase {
       b.cancel.width = layout.laneBtnW;
       b.cancel.height = layout.laneBtnH;
     });
+  }
+
+  _getVisiblePatternItems() {
+    const room = GameGlobal.databus.room;
+    // 五墩按本局实际玩家数（真人 + bot）决定是否展示，与房间 maxPlayers 上限解耦
+    const playerCount = room && Array.isArray(room.players) ? room.players.length : 0;
+    const showFive = (playerCount || 0) >= 5;
+    return this.patternBtns.filter((item) => item.def.key !== 'five' || showFive);
+  }
+
+  _refreshPatternButtons() {
+    const hand = GameGlobal.databus.myHand;
+    this.patternBtns.forEach((item) => {
+      if (!item.btn.visible) {
+        item.btn.disabled = true;
+        this._patternCombos[item.def.key] = [];
+        return;
+      }
+      const combos = findPatternCombos(hand, item.def.key);
+      this._patternCombos[item.def.key] = combos;
+      item.btn.disabled = combos.length === 0;
+    });
+  }
+
+  _selectPattern(key) {
+    const combos = this._patternCombos[key] || findPatternCombos(GameGlobal.databus.myHand, key);
+    if (!combos.length) return;
+    const next = this._patternCycle[key] || 0;
+    const combo = combos[next % combos.length];
+    GameGlobal.databus.selectedCards = combo.indices.slice();
+    this._patternCycle[key] = (next + 1) % combos.length;
+    this._resetHandSlide();
+  }
+
+  _resetPatternCycle() {
+    this._patternCycle = {};
   }
 
   // 进入阶段时刷新排序按钮颜色与按钮状态
@@ -143,6 +223,7 @@ export default class PlayPhase {
     GameGlobal.databus.myHand = (mode === 'suit') ? sortBySuit(hand) : sortByRank(hand);
     GameGlobal.databus.selectedCards = [];
     this._resetHandSlide();
+    this._resetPatternCycle();
   }
 
   _toggleHandCard(idx) {
@@ -198,6 +279,7 @@ export default class PlayPhase {
     db.myLanes[laneKey] = sortByRank(taken);
     db.selectedCards = [];
     this._resetHandSlide();
+    this._resetPatternCycle();
     // 检查是否两道已放完，自动补第三道
     const placed = LANE_DEFS.filter((d) => db.myLanes[d.key].length > 0);
     if (placed.length === 2 && db.myHand.length > 0) {
@@ -205,6 +287,7 @@ export default class PlayPhase {
       if (remain && db.myHand.length === remain.size) {
         db.myLanes[remain.key] = sortByRank(db.myHand);
         db.myHand = [];
+        this._resetPatternCycle();
       }
     }
     this._refreshOpenBtn();
@@ -220,6 +303,7 @@ export default class PlayPhase {
       : sortByRank(db.myHand.concat(cards));
     db.myLanes[laneKey] = [];
     db.selectedCards = [];
+    this._resetPatternCycle();
     this._refreshOpenBtn();
   }
 
@@ -252,22 +336,28 @@ export default class PlayPhase {
     // 三道放置区（桌子中部自适应布局）
     LANE_DEFS.forEach((def, i) => {
       const y = layout.laneY0 + i * (layout.laneH + layout.laneGap);
-      // 背景色：根据校验
-      let bg = 'rgba(255,255,255,0.10)';
+      // 背景色：使用实底框提升清晰度，校验后合法为绿、错误为红
+      let bg = 'rgba(20,72,44,0.92)';
+      let border = 'rgba(255,255,255,0.72)';
       if (this._validation) {
-        bg = this._validation.errors[def.key] ? 'rgba(76,175,80,0.30)' : 'rgba(244,67,54,0.30)';
+        const valid = this._validation.errors[def.key];
+        bg = valid ? 'rgba(38,116,58,0.94)' : 'rgba(126,45,42,0.94)';
+        border = valid ? 'rgba(129,199,132,0.9)' : 'rgba(239,154,154,0.9)';
       }
       ctx.fillStyle = bg;
-      ctx.fillRect(layout.laneX, y, layout.laneW, layout.laneH);
-      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      Card._roundRect(ctx, layout.laneX, y, layout.laneW, layout.laneH, 5);
+      ctx.fill();
+      ctx.strokeStyle = border;
       ctx.lineWidth = 1;
-      ctx.strokeRect(layout.laneX, y, layout.laneW, layout.laneH);
+      Card._roundRect(ctx, layout.laneX + 0.5, y + 0.5, layout.laneW - 1, layout.laneH - 1, 5);
+      ctx.stroke();
       // 道名标签
+      const laneLabelX = layout.laneX + 6;
       ctx.fillStyle = '#fff';
       ctx.font = '12px sans-serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillText(`${def.name} (${db.myLanes[def.key].length}/${def.size})`, layout.laneX + 4, y + 4);
+      ctx.fillText(`${def.name} (${db.myLanes[def.key].length}/${def.size})`, laneLabelX, y + 4);
       // 渲染道牌
       const cards = db.myLanes[def.key];
       if (cards.length > 0) {
@@ -280,9 +370,10 @@ export default class PlayPhase {
       if (cards.length === def.size) {
         const ev = evaluate(cards, def.key === 'head');
         ctx.fillStyle = '#ffe082';
-        ctx.font = 'bold 12px sans-serif';
-        ctx.textAlign = 'right';
-        ctx.fillText(ev.name || '', layout.laneX + layout.laneW - layout.laneBtnW - 12, y + 4);
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(ev.name || '', laneLabelX, y + layout.laneH - 5);
       }
     });
     // 操作按钮
@@ -290,6 +381,8 @@ export default class PlayPhase {
     this.sortSuitBtn.render(ctx);
     this.sortRankBtn.render(ctx);
     this.openBtn.render(ctx);
+    this._refreshPatternButtons();
+    this.patternBtns.forEach((item) => item.btn.render(ctx));
 
     // 手牌区（底部）
     const handW = SW - layout.margin * 2;
@@ -330,6 +423,10 @@ export default class PlayPhase {
     if (this.sortSuitBtn.handleTouch(x, y)) return true;
     if (this.sortRankBtn.handleTouch(x, y)) return true;
     if (this.openBtn.handleTouch(x, y)) return true;
+    this._refreshPatternButtons();
+    for (const item of this.patternBtns) {
+      if (item.btn.handleTouch(x, y)) return true;
+    }
     for (const b of this.laneActionBtns) {
       if (b.place.handleTouch(x, y)) return true;
       if (b.cancel.handleTouch(x, y)) return true;

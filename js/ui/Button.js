@@ -10,6 +10,7 @@ export default class Button {
     this.disabledColor = opts.disabledColor || '#999';
     this.textColor = opts.textColor || '#fff';
     this.fontSize = opts.fontSize || 16;
+    this.fontWeight = opts.fontWeight || 'bold';
     this.radius = opts.radius || 8;
     this.disabled = !!opts.disabled;
     this.visible = opts.visible !== false;
@@ -41,7 +42,7 @@ export default class Button {
     ctx.fillStyle = color;
     ctx.fill();
     ctx.fillStyle = this.textColor;
-    ctx.font = `${this.fontSize}px sans-serif`;
+    ctx.font = `${this.fontWeight} ${this.fontSize}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(this.text, this.x + this.width / 2, this.y + this.height / 2);
