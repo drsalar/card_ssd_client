@@ -219,6 +219,7 @@ export default class LobbyScene {
     this._userInfoBtn = null;
     // 最后一次渲染计算出的「头像+昵称」区域，用于同步 UserInfoButton 位置
     this._authRect = { left: 0, top: 0, width: 0, height: 0 };
+    this._pickingUserInfo = false;
 
     // 弹窗
     this.rulePanel = new RuleConfigPanel(
@@ -377,8 +378,6 @@ export default class LobbyScene {
       const ar = res && res.activeRoom;
       this.activeRoom = (ar && ar.roomId) ? ar : null;
       this._loginFailed = false;
-      // 登录成功后：若此设备从未填写过头像昵称，弹出一次引导流程（仅本进程弹一次）
-      this._maybePromptFirstTime();
     }).catch((err) => {
       console.warn('HTTP 登录失败', err);
       this._loginFailed = true;
@@ -441,32 +440,20 @@ export default class LobbyScene {
 
   // 单一入口：调起 pickUserInfo
   _pick(mode, extra = {}) {
+    if (this._pickingUserInfo) return;
+    this._pickingUserInfo = true;
     const ok = pickUserInfo((info) => {
       this._applyUserInfo(info);
       GameGlobal.toast.show('资料已更新');
     }, Object.assign({
       mode,
       currentNickname: GameGlobal.databus.user && GameGlobal.databus.user.nickname,
+      onComplete: () => { this._pickingUserInfo = false; },
     }, extra));
     if (!ok) {
+      this._pickingUserInfo = false;
       GameGlobal.toast.show('当前环境不支持');
     }
-  }
-
-  // 登录成功后：首次没填写过头像昵称时弹出引导
-  _maybePromptFirstTime() {
-    if (this._firstTimePrompted) return;
-    const u = GameGlobal.databus.user;
-    const hasAvatar = !!(u && u.avatarUrl);
-    const nick = (u && u.nickname) || '';
-    const isDefaultNick = !nick || /^玩家[0-9a-zA-Z]+$/.test(nick);
-    if (hasAvatar && !isDefaultNick) {
-      // 已经有自定义头像 + 昵称，不需要引导
-      this._firstTimePrompted = true;
-      return;
-    }
-    this._firstTimePrompted = true;
-    this._pick('both', { firstTime: true });
   }
   onExit() {
     // 离开大厅（进房间 / 切场景）隐藏按钮，避常驻画面
@@ -529,10 +516,11 @@ export default class LobbyScene {
       ctx.fillText('点击头像设置头像与昵称', SCREEN_WIDTH / 2, topY + avatarSize + 6);
     }
     // 同步 UserInfoButton 位置到「头像+昵称」起始区域（点击该区域授权）
-    this._authRect.left = groupX;
-    this._authRect.top = topY;
-    this._authRect.width = Math.max(avatarSize, groupW);
-    this._authRect.height = avatarSize;
+    const touchPadding = 12;
+    this._authRect.left = Math.max(0, groupX - touchPadding);
+    this._authRect.top = topY - touchPadding;
+    this._authRect.width = Math.min(SCREEN_WIDTH - this._authRect.left, Math.max(avatarSize, groupW) + touchPadding * 2);
+    this._authRect.height = avatarSize + touchPadding * 2;
     if (this._userInfoBtn) {
       this._userInfoBtn.setPosition(
         this._authRect.left,
@@ -559,11 +547,6 @@ export default class LobbyScene {
     const t = e.touches[0] || e.changedTouches[0];
     if (!t) return;
     const x = t.clientX, y = t.clientY;
-    // 登录失败状态下点击屏幕重试
-    if (this._loginFailed) {
-      this._httpLogin();
-      return;
-    }
     // 优先弹窗
     if (this.rulePanel.visible) { this.rulePanel.handleTouch(x, y); return; }
     if (this.idPanel.visible) { this.idPanel.handleTouch(x, y); return; }
@@ -574,6 +557,11 @@ export default class LobbyScene {
         x >= r.left && x <= r.left + r.width &&
         y >= r.top && y <= r.top + r.height) {
       this._handleAvatarTap();
+      return;
+    }
+    // 登录失败状态下点击其他区域重试，避免吞掉头像修改入口
+    if (this._loginFailed) {
+      this._httpLogin();
       return;
     }
     if (this.activeRoom && this.reenterBtn.handleTouch(x, y)) return;

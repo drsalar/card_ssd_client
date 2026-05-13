@@ -38,8 +38,11 @@ function isFlush(cards) {
   return cards.every((c) => c.suit.replace('2', '') === s0);
 }
 
-// 是否顺子（A 可作 1 用），返回 { ok, top }
-// top: 顺子的最大点数（1-5 顺子 top=5；10-A 顺子 top=14）
+// 是否顺子（A 可作 1 用），返回 { ok, top, secondary? }
+// top: 顺子比牌用顶点
+//   普通顺子（5..K 顶点）→ top=最大点
+//   10-J-Q-K-A → top=14
+//   A-2-3-4-5  → top=13，并附 secondary=14（仅次于 10-A、大于其他所有顺子；与 9-K 顶点顺子平局时按 secondary 打破）
 function checkStraight(cards) {
   if (cards.length !== 5) return { ok: false };
   // 取去重 rank
@@ -47,19 +50,24 @@ function checkStraight(cards) {
   for (let i = 1; i < ranks.length; i++) {
     if (ranks[i] === ranks[i - 1]) return { ok: false }; // 有重复无法成顺
   }
+  // 1-2-3-4-5（A 当 1）：优先识别，避免被普通顺子分支覆盖
+  if (ranks[0] === 1 && ranks[1] === 2 && ranks[2] === 3 && ranks[3] === 4 && ranks[4] === 5) {
+    return { ok: true, top: 13, secondary: 14 };
+  }
   // 普通顺子
   if (ranks[4] - ranks[0] === 4) {
-    return { ok: true, top: ranks[4] === 1 ? 14 : (ranks[4] === 13 && ranks[0] === 9 ? 13 : ranks[4]) };
+    return { ok: true, top: ranks[4] };
   }
   // 10-J-Q-K-A : ranks 排序后 = [1,10,11,12,13]
   if (ranks[0] === 1 && ranks[1] === 10 && ranks[4] === 13) {
     return { ok: true, top: 14 };
   }
-  // 1-2-3-4-5: ranks = [1,2,3,4,5]
-  if (ranks[0] === 1 && ranks[4] === 5 && ranks[1] === 2 && ranks[2] === 3 && ranks[3] === 4) {
-    return { ok: true, top: 5 };
-  }
   return { ok: false };
+}
+
+// 顺子用于比牌的 ranks 数组：A2345 → [13,14]；其余 → [top]
+function straightRanks(s) {
+  return s.secondary ? [s.top, s.secondary] : [s.top];
 }
 
 // 评估 5 张牌的牌型
@@ -86,7 +94,7 @@ function evaluate(cards, isHead) {
   const straight = checkStraight(cards);
   // 同花顺
   if (flush && straight.ok) {
-    return { type: TYPE.STRAIGHT_FLUSH, name: TYPE_NAME[9], ranks: [straight.top] };
+    return { type: TYPE.STRAIGHT_FLUSH, name: TYPE_NAME[9], ranks: straightRanks(straight) };
   }
   // 炸弹（4 张同点）
   if (counts[0] === 4) {
@@ -124,7 +132,7 @@ function evaluate(cards, isHead) {
   }
   // 顺子
   if (straight.ok) {
-    return { type: TYPE.STRAIGHT, name: TYPE_NAME[5], ranks: [straight.top] };
+    return { type: TYPE.STRAIGHT, name: TYPE_NAME[5], ranks: straightRanks(straight) };
   }
   // 三条（中尾道）
   if (counts[0] === 3) {

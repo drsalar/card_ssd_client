@@ -30,7 +30,7 @@ go run .
 
 1. 进入主页后按缓存状态自动播放 `audio/bgm2.mp3`，连接状态下方可通过 `♫ 开/关` 切换背景音乐，绿色表示开启、红色表示关闭；也可以「创建房间」（设置带马牌、局数 5/10/15/20、最大玩家数 2-6）或「加入房间」（输入 4 位房间号）
 2. 进入对局页：自适应横向椭圆牌桌、玩家头像/昵称/积分/状态，发牌后未开牌玩家显示 `出牌中`，自己始终在底部；连接状态下方同样提供 `♫ 开/关`；打牌/比牌阶段牌桌会适当加长，牌桌底部以手牌区顶部为参考并保持固定间隔，不再按整个画面上对齐；放置区会同步围绕当前牌桌中心展示并按玩家数量预留左右安全区，使用更清晰的实底框并与玩家头像保持间距，牌桌、放置区和手牌会按屏幕尺寸自适应缩放，避免遮挡玩家
-3. 全员准备后开局：每人 13 张牌 → 手牌默认按点数排序，可切换为黑桃/红桃/梅花/方块顺序的花色排序，牌面点数保持红黑高对比，黑桃、红桃、梅花、方块通过花色符号颜色与细侧边提示线轻量区分，红桃 5 马牌会以高对比牌底、亮色描边和纹理高亮展示；加色牌沿用对应花色显示，避免牌面颜色不一致；手牌支持点击或滑动经过切换选中状态，手牌下方提供牌型快捷按钮（五龙、同花顺、炸弹、葫芦、同花、顺子、三条、对子，五龙仅 5 人以上显示），可用时高亮，重复点击会轮换选中不同组合 → 点击“放入”或直接点击头道/中道/尾道放置区放入选中手牌，放置区道牌按点数排序展示 → 校验大小（绿/红色提示）→ 开牌
+3. 全员准备后开局：每人 13 张牌 → 手牌默认按点数排序，可切换为黑桃/红桃/梅花/方块顺序的花色排序，牌面点数保持红黑高对比，黑桃、红桃、梅花、方块通过花色符号颜色、细侧边提示线和底部短标签（黑/红/梅/方）区分，手机端小牌也能快速分辨同颜色花色；红桃 5 马牌会以高对比牌底、亮色描边和纹理高亮展示；加色牌沿用对应花色显示，避免牌面颜色不一致；手牌支持点击或滑动经过切换选中状态，手牌下方提供牌型快捷按钮（五龙、同花顺、炸弹、葫芦、同花、顺子、三条、对子，五龙仅 5 人以上显示），可用时高亮，重复点击会轮换选中不同组合 → 点击“放入”或直接点击头道/中道/尾道放置区放入选中手牌，放置区道牌按点数排序展示 → 校验大小（绿/红色提示）→ 开牌；开牌后的“等待其他玩家”提示显示在底部手牌区，避免遮挡玩家积分
 4. 全员开牌后进入比牌动画：头道/中道/尾道依次展示（牌桌保持与打牌阶段一致的大小；每道牌按点数排序，`3-6` 人会按玩家位置自动缩小牌面，左右两侧含底部左右座位统一形成左侧上移、右侧下移的固定高度差，避免多人对比区域重叠并方便区分） → 如有打枪则播放胜方到败方的枪击弹道动画和 `audio/bullet.mp3` → 如有本垒打则展示本垒打并播放 `audio/boom.mp3` → 弹出本局统计（以紧凑布局适配 5 人场完整展示，扑克牌左上角裁剪图按点数排序展示每道牌，右侧分列显示牌型、分数、打枪目标；打枪目标使用枪击风格背景且仅显示被打枪昵称，多个昵称用逗号分隔；全垒打玩家整行使用强力结果背景色；特殊加分牌型按分值使用蓝/橙/红区分）
 5. 全员确认后下一局；达到总局数后展示总积分排行；全员退出房间则销毁该房间内存数据
 
@@ -113,20 +113,21 @@ go run .
 
 主页与对局中玩家的头像与昵称使用微信官方资料（`avatarUrl` / `nickName`）进行展示，服务端不需修改协议，仅复用现有 `nickname` / `avatarUrl` 字段。
 
-- **获取时机**：微信小游戏自基础库 2.27.1 起强制返回「微信用户 + 灰色头像」，wx.getUserProfile 也在小游戏端废弃。本项目采用官方推荐的 [wx.createUserInfoButton](https://developers.weixin.qq.com/minigame/dev/api/open-api/user-info/wx.createUserInfoButton.html)：在主页顶部「头像+昵称」区域叠加一个透明原生按钮，玩家点击后才会拿到真实的 `nickName + avatarUrl`。
-- **启动体验**：[main.js](./js/main.js) `initUser()` 仅读本地缓存 `wx_user_info`（[js/utils/wx_user.js](./js/utils/wx_user.js)）填充 `databus.user`，上次授过权的玩家下次进入同样看到自己的微信头像；尚未授权时使用「玩家 + openid 后4位」作为兜底并在头像下提示「点击头像区域授权微信昵称」。
-- **主页展示**：[lobby_scene.js](./js/scenes/lobby_scene.js) 顶部在昵称左侧增绘 36px 圆形头像（复用 [Avatar](./js/ui/Avatar.js) 的加载与兑底首字符逻辑）；`onEnter` 创建透明 UserInfoButton 并每帧同步到「头像+昵称」区域，`onExit` 隐藏避免叠在其他场景；点击并授权后调 `selfAvatar.setUrl` 重绘，并 `eventBus.emit('user_info_updated')` 进而重新调 `POST /api/login` 同步服务端 session。
+- **获取时机**：微信小游戏自基础库 2.27.1 起强制返回「微信用户 + 灰色头像」，wx.getUserProfile 也在小游戏端废弃。本项目在主页顶部「头像+昵称」区域响应画布点击，弹出「换头像 / 改昵称」菜单；头像通过 `wx.chooseMedia` / `wx.chooseImage` 选择，昵称通过可编辑弹窗填写。
+- **启动体验**：[main.js](./js/main.js) `initUser()` 仅读本地缓存 `wx_user_info`（[js/utils/wx_user.js](./js/utils/wx_user.js)）填充 `databus.user`，上次设置过资料的玩家下次进入同样看到自己的头像；尚未设置时使用「玩家 + openid 后4位」作为兜底并在头像下提示「点击头像设置头像与昵称」。
+- **主页展示**：[lobby_scene.js](./js/scenes/lobby_scene.js) 顶部在昵称左侧增绘 36px 圆形头像（复用 [Avatar](./js/ui/Avatar.js) 的加载与兜底首字符逻辑）；点击头像区域后调用 `pickUserInfo`，更新成功后调 `selfAvatar.setUrl` 重绘，并 `eventBus.emit('user_info_updated')` 进而重新调 `POST /api/login` 同步服务端 session。再次换头像会优先直接唤起头像选择器；若系统返回相册 / 相机授权失败，再通过 `wx.getSetting` 确认状态，并引导打开 `wx.openSetting` 后重试选择。
 - **对局展示**：[room_scene.js](./js/scenes/room_scene.js) / [settle_phase.js](./js/scenes/settle_phase.js) 复用 [PlayerSeat](./js/ui/PlayerSeat.js) 渲染所有玩家的头像与昵称；结算面板每行额外增绘 22px 小头像。机器人保留“电脑X”+ BOT 角标。
 - **字段流向**：
 
-```
-用户点击 UserInfoButton → success(userInfo)
+```text
+用户点击头像区域 → 选择头像 / 填写昵称
               → databus.user (nickname/avatarUrl) + storage 缓存
               → POST /api/login 上报 → Session.Nickname/AvatarUrl
               → WS LOGIN 帧上报（_autoLogin 从 databus 实时读取）
               → Player.Nickname/AvatarUrl（进房 / Upsert 同步）
               → ROOM_STATE.players[*].nickname/avatarUrl 广播到同房间
 ```
+
 - **大厅仅 HTTP**：客户端启动不再连接 WebSocket，进入大厅后调用 `POST /api/login` 一次性获得身份与 `activeRoom` 摘要；返回为空则隐藏“重新进入”按钮。可随时 `GET /api/lobby/active-room?openid=xxx` 复查。HTTP 接口是只读的，不会修改 Session/Player 在线状态。
 - **微信登录链路（方案 B）**：`js/main.js → initUser` 在小游戏环境下不再生成本地 `guest_xxxx`，而是异步调 `wx.login` 取临时 `code`；`lobby_scene._httpLogin` 把 `{ code, nickname, avatarUrl }` 提交到 `POST /api/login`，服务端调用 `https://api.weixin.qq.com/sns/jscode2session` 解出真实 openid 后随响应返回。客户端拿到 `res.openid` 并写回 `wx.setStorageSync('openid', ...)` 与 `databus.user.openid`，后续 WS `LOGIN`、`/api/lobby/active-room` 均使用真实 openid。`code` 失败时服务端退化为读取请求头 `X-WX-OPENID`（云托管自动注入）。
 - **云托管通道**：所有 HTTP 与 WebSocket 默认走微信云托管 `wx.cloud.callContainer` / `wx.cloud.connectContainer`，无需在小游戏后台配置 request/socket 合法域名。云环境通过 `GameGlobal.CLOUD_ENV`（默认 `prod-d1gy3h2lh5a169861`）+ `GameGlobal.CLOUD_SERVICE`（默认 `golang-8gye`）配置；非小游戏环境（如浏览器调试）自动降级到 `wx.request` / `fetch` + `wx.connectSocket` / `WebSocket`，此时 `GameGlobal.HTTP_BASE` / `GameGlobal.SOCKET_URL` 作为兜底地址。

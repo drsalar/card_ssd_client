@@ -37,6 +37,104 @@ export function saveWxUserInfo(info) {
   } catch (e) { /* 静默 */ }
 }
 
+function isAvatarAuthError(err) {
+  const msg = String((err && err.errMsg) || err || '').toLowerCase();
+  return msg.includes('auth') || msg.includes('authorize') || msg.includes('permission') || msg.includes('deny') || msg.includes('denied');
+}
+
+function getDeniedAvatarAuthScopes() {
+  return new Promise((resolve) => {
+    if (typeof wx === 'undefined' || typeof wx.getSetting !== 'function') {
+      resolve([]);
+      return;
+    }
+    wx.getSetting({
+      success: (res) => {
+        const auth = (res && res.authSetting) || {};
+        const denied = [];
+        if (auth['scope.camera'] === false) denied.push('scope.camera');
+        if (auth['scope.album'] === false) denied.push('scope.album');
+        resolve(denied);
+      },
+      fail: () => resolve([]),
+    });
+  });
+}
+
+function openAvatarAuthSetting() {
+  return new Promise((resolve) => {
+    if (typeof wx === 'undefined' || typeof wx.showModal !== 'function' || typeof wx.openSetting !== 'function') {
+      resolve(false);
+      return;
+    }
+    wx.showModal({
+      title: '需要授权',
+      content: '之前未允许相册或相机权限，请在微信设置中开启后再选择头像。',
+      confirmText: '去设置',
+      cancelText: '取消',
+      success: (r) => {
+        if (!r.confirm) {
+          resolve(false);
+          return;
+        }
+        wx.openSetting({
+          success: (setting) => {
+            const auth = (setting && setting.authSetting) || {};
+            resolve(auth['scope.camera'] !== false && auth['scope.album'] !== false);
+          },
+          fail: () => resolve(false),
+        });
+      },
+      fail: () => resolve(false),
+    });
+  });
+}
+
+function chooseAvatarFile() {
+  return new Promise((resolve) => {
+    const done = (avatarUrl, err = null) => resolve({ avatarUrl, err });
+    if (typeof wx.chooseMedia === 'function') {
+      wx.chooseMedia({
+        count: 1,
+        mediaType: ['image'],
+        sourceType: ['album', 'camera'],
+        sizeType: ['compressed'],
+        success: (res) => {
+          const f = res && res.tempFiles && res.tempFiles[0];
+          done(f && f.tempFilePath ? f.tempFilePath : '');
+        },
+        fail: (err) => done('', err),
+      });
+    } else if (typeof wx.chooseImage === 'function') {
+      wx.chooseImage({
+        count: 1,
+        sizeType: ['compressed'],
+        sourceType: ['album', 'camera'],
+        success: (res) => {
+          const p = res && res.tempFilePaths && res.tempFilePaths[0];
+          done(p || '');
+        },
+        fail: (err) => done('', err),
+      });
+    } else {
+      done('');
+    }
+  });
+}
+
+function pickAvatarFile() {
+  return chooseAvatarFile().then((result) => {
+    if (result.avatarUrl || !isAvatarAuthError(result.err)) return result.avatarUrl || '';
+    return getDeniedAvatarAuthScopes().then((denied) => {
+      if (denied.length === 0) return '';
+      return openAvatarAuthSetting().then((enabled) => {
+        if (!enabled) return '';
+        return chooseAvatarFile().then((retry) => retry.avatarUrl || '');
+      });
+    });
+  });
+}
+
 // 创建一个透明的 wx.createUserInfoButton 叠加层
 // - rect: { left, top, width, height }（逻辑像素，与 SCREEN_WIDTH 同坐标系）
 // - onSuccess(info): 用户点击并授权成功后回调，info = { nickname, avatarUrl }
@@ -122,34 +220,7 @@ export function pickUserInfo(onSuccess, options = {}) {
   }
   const mode = options.mode || 'both';
   const currentNick = (options.currentNickname || '').toString();
-  const pickAvatar = () => new Promise((resolve) => {
-    if (typeof wx.chooseMedia === 'function') {
-      wx.chooseMedia({
-        count: 1,
-        mediaType: ['image'],
-        sourceType: ['album', 'camera'],
-        sizeType: ['compressed'],
-        success: (res) => {
-          const f = res && res.tempFiles && res.tempFiles[0];
-          resolve(f && f.tempFilePath ? f.tempFilePath : '');
-        },
-        fail: () => resolve(''),
-      });
-    } else if (typeof wx.chooseImage === 'function') {
-      wx.chooseImage({
-        count: 1,
-        sizeType: ['compressed'],
-        sourceType: ['album', 'camera'],
-        success: (res) => {
-          const p = res && res.tempFilePaths && res.tempFilePaths[0];
-          resolve(p || '');
-        },
-        fail: () => resolve(''),
-      });
-    } else {
-      resolve('');
-    }
-  });
+  const pickAvatar = () => pickAvatarFile();
   const askNickname = () => new Promise((resolve) => {
     if (typeof wx.showModal !== 'function') { resolve(''); return; }
     wx.showModal({
@@ -187,16 +258,22 @@ export function pickUserInfo(onSuccess, options = {}) {
     saveWxUserInfo(merged);
     if (typeof onSuccess === 'function') onSuccess(merged);
   };
+  let completed = false;
+  const complete = () => {
+    if (completed) return;
+    completed = true;
+    if (typeof options.onComplete === 'function') options.onComplete();
+  };
 
   confirmFirstTime().then((go) => {
-    if (!go) return;
+    if (!go) { complete(); return; }
     if (mode === 'avatar') {
-      pickAvatar().then((avatarUrl) => commit(avatarUrl, ''));
+      pickAvatar().then((avatarUrl) => { commit(avatarUrl, ''); complete(); });
     } else if (mode === 'nickname') {
-      askNickname().then((nickname) => commit('', nickname));
+      askNickname().then((nickname) => { commit('', nickname); complete(); });
     } else {
-      pickAvatar().then((avatarUrl) => askNickname().then((nickname) => commit(avatarUrl, nickname)));
+      pickAvatar().then((avatarUrl) => askNickname().then((nickname) => { commit(avatarUrl, nickname); complete(); }));
     }
-  });
+  }).catch(() => complete());
   return true;
 }

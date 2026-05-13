@@ -4,14 +4,14 @@
 
 // 花色显示符号与颜色
 const SUIT_STYLE = {
-  S: { symbol: '♠', color: '#151922', accent: '#3f4758' },
-  H: { symbol: '♥', color: '#d81b42', accent: '#ff5f7d' },
-  D: { symbol: '♦', color: '#e65a00', accent: '#f2a01f' },
-  C: { symbol: '♣', color: '#087a3a', accent: '#2fb35f' },
-  D2: { symbol: '♦', color: '#e65a00', accent: '#f2a01f' },
-  C2: { symbol: '♣', color: '#087a3a', accent: '#2fb35f' },
+  S: { symbol: '♠', label: '黑', color: '#151922', accent: '#3f4758', labelBg: '#1f2937' },
+  H: { symbol: '♥', label: '红', color: '#d81b42', accent: '#ff5f7d', labelBg: '#d81b42' },
+  D: { symbol: '♦', label: '方', color: '#e65a00', accent: '#f2a01f', labelBg: '#f59e0b' },
+  C: { symbol: '♣', label: '梅', color: '#087a3a', accent: '#2fb35f', labelBg: '#16a34a' },
+  D2: { symbol: '♦', label: '方', color: '#e65a00', accent: '#f2a01f', labelBg: '#f59e0b' },
+  C2: { symbol: '♣', label: '梅', color: '#087a3a', accent: '#2fb35f', labelBg: '#16a34a' },
 };
-const DEFAULT_SUIT_STYLE = { symbol: '?', color: '#222', accent: '#888' };
+const DEFAULT_SUIT_STYLE = { symbol: '?', label: '?', color: '#222', accent: '#888', labelBg: '#6b7280' };
 // 点数显示
 const RANK_TEXT = {
   1: 'A', 11: 'J', 12: 'Q', 13: 'K',
@@ -73,6 +73,9 @@ export default class Card {
     ctx.fillText(suitStyle.symbol, x + w / 2, y + dy + h / 2 + 4);
     ctx.globalAlpha = 1;
 
+    // 底部花色标签：手机端小牌也能区分同色花色
+    Card._drawSuitLabel(ctx, x, y + dy, w, h, suitStyle);
+
     ctx.restore();
   }
 
@@ -121,6 +124,7 @@ export default class Card {
     ctx.font = `bold ${Math.max(10, Math.floor(h * 0.38))}px sans-serif`;
     ctx.fillStyle = suitStyle.color;
     ctx.fillText(suitStyle.symbol, x + 3, y + Math.floor(h * 0.48));
+    Card._drawSuitLabel(ctx, x, y, w, h, suitStyle, { compact: true });
 
     ctx.restore();
   }
@@ -141,6 +145,27 @@ export default class Card {
     ctx.fillStyle = style.accent;
     ctx.globalAlpha = ma ? 0.22 : 0.16;
     ctx.fillRect(x + 1, y + 1, Math.max(2, Math.floor(w * 0.045)), h - 2);
+    ctx.restore();
+  }
+
+  static _drawSuitLabel(ctx, x, y, w, h, style, opts = {}) {
+    const compact = !!opts.compact;
+    const boxW = Math.max(compact ? 12 : 16, Math.floor(w * (compact ? 0.48 : 0.42)));
+    const boxH = Math.max(compact ? 9 : 12, Math.floor(h * (compact ? 0.28 : 0.20)));
+    const boxX = x + w - boxW - 3;
+    const boxY = y + h - boxH - 3;
+
+    ctx.save();
+    Card._roundRect(ctx, boxX, boxY, boxW, boxH, Math.max(2, Math.floor(boxH * 0.28)));
+    ctx.fillStyle = style.labelBg;
+    ctx.globalAlpha = 0.96;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `bold ${Math.max(compact ? 8 : 10, Math.floor(boxH * 0.78))}px sans-serif`;
+    ctx.fillText(style.label, boxX + boxW / 2, boxY + boxH / 2 + 0.5);
     ctx.restore();
   }
 

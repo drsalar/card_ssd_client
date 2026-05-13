@@ -31,16 +31,23 @@ function checkStraight(cards) {
   for (let i = 1; i < ranks.length; i++) {
     if (ranks[i] === ranks[i - 1]) return { ok: false };
   }
+  // A-2-3-4-5：A=1，排序后即 [1,2,3,4,5]，top=13 表示"仅次于 10-A，大于其他所有顺子"
+  // 同时附加 secondary=14 用于打破与 9-10-J-Q-K（top=13）的平局
+  if (ranks[0] === 1 && ranks[1] === 2 && ranks[2] === 3 && ranks[3] === 4 && ranks[4] === 5) {
+    return { ok: true, top: 13, secondary: 14 };
+  }
   if (ranks[4] - ranks[0] === 4) {
-    return { ok: true, top: ranks[4] === 1 ? 14 : ranks[4] };
+    return { ok: true, top: ranks[4] };
   }
   if (ranks[0] === 1 && ranks[1] === 10 && ranks[4] === 13) {
     return { ok: true, top: 14 };
   }
-  if (ranks[0] === 1 && ranks[4] === 5) {
-    return { ok: true, top: 5 };
-  }
   return { ok: false };
+}
+
+// 顺子用于比牌的 ranks 数组：A2345 返回 [13, 14]，其余返回 [top]
+function straightRanks(s) {
+  return s.secondary ? [s.top, s.secondary] : [s.top];
 }
 
 function countPairs(groups) {
@@ -63,7 +70,7 @@ export function evaluate(cards, isHead) {
   const flush = isFlush(cards);
   const straight = checkStraight(cards);
   if (flush && straight.ok) {
-    return { type: TYPE.STRAIGHT_FLUSH, name: TYPE_NAME[9], ranks: [straight.top] };
+    return { type: TYPE.STRAIGHT_FLUSH, name: TYPE_NAME[9], ranks: straightRanks(straight) };
   }
   if (counts[0] === 4) {
     let four = 0, kicker = 0;
@@ -89,7 +96,7 @@ export function evaluate(cards, isHead) {
       extra: { pairs },
     };
   }
-  if (straight.ok) return { type: TYPE.STRAIGHT, name: TYPE_NAME[5], ranks: [straight.top] };
+  if (straight.ok) return { type: TYPE.STRAIGHT, name: TYPE_NAME[5], ranks: straightRanks(straight) };
   if (counts[0] === 3) {
     let three = 0; const kickers = [];
     for (const r in groups) {

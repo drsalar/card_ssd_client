@@ -393,13 +393,22 @@ export default class PlayPhase {
       selected: new Set(db.selectedCards),
     });
 
-    // 提示已开牌
+    // 提示已开牌：放到手牌区，避免与底部玩家积分重叠
     if (this._submitted) {
       ctx.save();
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      const text = '已开牌，等待其他玩家...';
+      const y = layout.handY + Math.floor(layout.handCardH * 0.5);
       ctx.font = 'bold 16px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('已开牌，等待其他玩家...', SW / 2, Math.max(layout.actionY - 24, layout.laneY0 - 18));
+      ctx.textBaseline = 'middle';
+      const textW = ctx.measureText(text).width;
+      const boxW = Math.min(SW - layout.margin * 2, textW + 28);
+      const boxH = 28;
+      ctx.fillStyle = 'rgba(20,72,44,0.86)';
+      Card._roundRect(ctx, (SW - boxW) / 2, y - boxH / 2, boxW, boxH, 14);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.fillText(text, SW / 2, y);
       ctx.restore();
     }
   }
